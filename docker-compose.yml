@@ -1,0 +1,48 @@
+# 로컬 테스트용 Docker Compose 파일
+# 프로덕션 배포는 k8s에서 진행됩니다.
+
+version: '3.8'
+
+services:
+  tableau-slack-report:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tableau-slack-report-local
+    ports:
+      - "8080:8080"
+    environment:
+      # 필수 환경 변수 (실제 값은 .env 파일이나 환경에서 설정)
+      - TABLEAU_SERVER_URL=${TABLEAU_SERVER_URL:-https://tableau.example.com}
+      - TABLEAU_PAT_NAME=${TABLEAU_PAT_NAME:-your_pat_name}
+      - TABLEAU_PAT_SECRET=${TABLEAU_PAT_SECRET:-your_pat_secret}
+      - TABLEAU_SITE_ID=${TABLEAU_SITE_ID:-Default}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-xoxb-your-slack-bot-token}
+      - SLACK_CHANNEL=${SLACK_CHANNEL:-your-channel-id}
+      - SLACK_TEAM_NAME=${SLACK_TEAM_NAME:-Your Team Name}
+      # 타임존 설정
+      - TZ=Asia/Seoul
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=false"
+      - "com.docker.compose.project=tableau-slack-report"
+    networks:
+      - tableau-network
+
+networks:
+  tableau-network:
+    driver: bridge
+    name: tableau-slack-network
+
+# 사용법:
+# 1. 환경 변수 설정 (.env 파일 생성 또는 export)
+# 2. docker-compose up -d
+# 3. 서비스 확인: curl http://localhost:8080/health
+# 4. 수동 실행: curl -X POST http://localhost:8080/trigger
+# 5. 상태 확인: curl http://localhost:8080/status
