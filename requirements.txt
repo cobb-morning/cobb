@@ -1,0 +1,7 @@
+requirements.txt
+
+requests
+slack-sdk
+schedule
+pytz
+Flask
