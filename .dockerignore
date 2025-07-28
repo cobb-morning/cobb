@@ -1,0 +1,107 @@
+# Docker 빌드 최적화를 위한 .dockerignore 파일
+
+# Git 관련 파일들
+.git
+.gitignore
+.gitattributes
+.gitmodules
+
+# IDE 및 에디터 설정 파일들
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS 생성 파일들
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python 관련 임시 파일들
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.env
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 테스트 관련 파일들
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+htmlcov/
+
+# 로그 파일들
+*.log
+logs/
+
+# 문서 관련 파일들
+README.md
+*.md
+docs/
+
+# 설정 및 예시 파일들
+.env.example
+.env.local
+.env.development
+.env.test
+.env.production
+
+# 임시 파일들
+*.tmp
+*.temp
+.tmp/
+temp/
+
+# Docker 관련 파일들 (Dockerfile 제외)
+docker-compose.yml
+docker-compose.yaml
+docker-compose.*.yml
+docker-compose.*.yaml
+
+# CI/CD 관련 파일들
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+Jenkinsfile
+
+# 패키지 매니저 잠금 파일들 (의존성 설치는 requirements.txt 사용)
+poetry.lock
+Pipfile.lock
+
+# 백업 파일들
+*.bak
+*.backup
+*.orig
+
+# 데이터 파일들
+*.csv
+*.json
+*.xml
+data/
+datasets/
+
+# 개발 전용 스크립트들
+scripts/
+dev/
+development/
+
+# 테스트 데이터 및 결과물
+test_results/
+test_data/
