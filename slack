@@ -1,0 +1,216 @@
+import requests
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+import os
+from datetime import datetime, timedelta
+import concurrent.futures
+from functools import partial
+import sys # sys 모듈 추가
+
+# --- 환경 변수 로드 (GitHub Secrets에서 값을 가져옴) ---
+# 스크립트 실행 전, 필수 환경 변수가 설정되었는지 확인합니다.
+required_secrets = [
+    'TABLEAU_PAT_NAME', 'TABLEAU_PAT_SECRET', 'SLACK_BOT_TOKEN', 'SLACK_CHANNEL'
+]
+missing_secrets = [secret for secret in required_secrets if not os.environ.get(secret)]
+
+if missing_secrets:
+    print(f"오류: 필수 환경 변수가 설정되지 않았습니다: {', '.join(missing_secrets)}")
+    print("GitHub 저장소의 Settings > Secrets and variables > Actions 에서 변수를 설정해주세요.")
+    sys.exit(1) # 스크립트 중단
+
+TABLEAU_SERVER_URL = os.environ.get('TABLEAU_SERVER_URL', 'https://tableau.kakaocorp.com')
+TABLEAU_PAT_NAME = os.environ.get('TABLEAU_PAT_NAME')
+TABLEAU_PAT_SECRET = os.environ.get('TABLEAU_PAT_SECRET')
+TABLEAU_SITE_ID = os.environ.get('TABLEAU_SITE_ID', 'Kakao_Mobility')
+SLACK_BOT_TOKEN = os.environ.get('SLACK_BOT_TOKEN')
+SLACK_CHANNEL = os.environ.get('SLACK_CHANNEL')
+SLACK_TEAM_NAME = os.environ.get('SLACK_TEAM_NAME', "CX 시너지팀")
+
+
+# --- 날짜 및 헤더 메시지 관련 함수 ---
+def get_yesterday_date_ko():
+    """어제 날짜를 'YYYY/MM/DD(요일)' 형식으로 반환합니다."""
+    yesterday = datetime.now() - timedelta(days=1)
+    days_ko = ["월", "화", "수", "목", "금", "토", "일"]
+    return f"{yesterday.strftime('%Y/%m/%d')}({days_ko[yesterday.weekday()]})"
+
+def send_header_message_to_slack(client, channel_id, team_name):
+    """슬랙에 날짜와 팀 정보를 포함한 헤더 메시지와 구분선을 전송합니다."""
+    yesterday_str = get_yesterday_date_ko()
+    header_text_with_emoji = f"🗓️ {yesterday_str}  |  👥 {team_name}"
+    blocks = [
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": header_text_with_emoji}]},
+        {"type": "divider"}
+    ]
+    try:
+        client.chat_postMessage(
+            channel=channel_id,
+            blocks=blocks,
+            text=f"{yesterday_str} | {team_name}"
+        )
+    except SlackApiError as e:
+        print(f"Slack API 오류 발생 (헤더 메시지): {e.response['error']}")
+    except Exception as e:
+        print(f"Slack 헤더 메시지 전송 중 예기치 않은 오류 발생: {e}")
+
+# --- 태블로 인증 및 대시보드 내보내기 함수 ---
+def tableau_auth(server_url, pat_name, pat_secret, site_id=''):
+    """태블로 PAT로 인증하고 세션 토큰을 반환합니다."""
+    auth_url = f"{server_url}/api/3.17/auth/signin"
+    headers = {'Content-Type': 'application/json', 'Accept': 'application/json'}
+    payload = {
+        'credentials': {
+            'personalAccessTokenName': pat_name,
+            'personalAccessTokenSecret': pat_secret,
+            'site': {'contentUrl': site_id}
+        }
+    }
+    try:
+        print("태블로 서버에 인증을 시도합니다...")
+        response = requests.post(auth_url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        credentials = response.json()['credentials']
+        print("태블로 인증 성공!")
+        return credentials['token'], credentials['site']['id']
+    except requests.exceptions.RequestException as req_err:
+        print(f"태블로 인증 중 요청 오류 발생: {req_err}")
+    except Exception as e:
+        print(f"태블로 인증 중 예기치 않은 오류 발생: {e}")
+    return None, None
+
+def export_dashboard(view_info, server_url, tableau_api_token, site_luid):
+    """단일 대시보드를 이미지 파일로 내보냅니다."""
+    view_luid = view_info['luid']
+    image_filename = view_info['filename']
+    print(f"다운로드 시작: {image_filename}")
+    export_url = f"{server_url}/api/3.17/sites/{site_luid}/views/{view_luid}/image"
+    headers = {'X-Tableau-Auth': tableau_api_token, 'Accept': 'application/json'}
+    params = {'resolution': 'high'}
+    try:
+        # GitHub Actions 환경에서는 파일을 /tmp 디렉터리에 저장하는 것이 좋습니다.
+        filepath = os.path.join("/tmp", image_filename)
+        response = requests.get(export_url, headers=headers, params=params, timeout=120)
+        response.raise_for_status()
+        with open(filepath, 'wb') as file:
+            file.write(response.content)
+        print(f"다운로드 성공: {filepath}")
+        return filepath
+    except requests.exceptions.RequestException as req_err:
+        print(f"대시보드 내보내기 중 오류 발생 (뷰 ID: {view_luid}): {req_err}")
+    return None
+
+# --- 이미지 그룹과 제목을 함께 전송하는 함수 ---
+def send_image_group_to_slack(client, channel_id, downloaded_paths, group_info):
+    """다운로드된 여러 이미지 파일을 제목과 함께 하나의 슬랙 메시지로 전송합니다."""
+    if not downloaded_paths:
+        group_name = group_info[0].get('title_core', '알 수 없는 그룹')
+        print(f"'{group_name}'에 업로드할 이미지가 없습니다.")
+        return False
+
+    file_uploads = [{"file": path, "filename": os.path.basename(path)} for path in downloaded_paths]
+
+    main_view_info = group_info[0]
+    initial_comment_text = f"*{main_view_info['prefix_emoji']}* <{main_view_info['link_url']}|*{main_view_info['title_core']}*> *{main_view_info['postfix_emoji']}*"
+    
+    group_name_for_log = main_view_info['title_core']
+    print(f"'{group_name_for_log}' 그룹 업로드 준비...")
+
+    try:
+        response = client.files_upload_v2(
+            channel=channel_id,
+            initial_comment=initial_comment_text,
+            file_uploads=file_uploads
+        )
+        if response.get("ok"):
+            print(f"'{group_name_for_log}' 그룹 업로드 성공!")
+            return True
+        else:
+            print(f"'{group_name_for_log}' 그룹 업로드 실패: {response.get('error')}")
+            return False
+    except SlackApiError as e:
+        print(f"Slack API 오류 발생 (파일 그룹 업로드): {e.response['error']}")
+    except Exception as e:
+        print(f"Slack 파일 그룹 업로드 중 예기치 않은 오류 발생: {e}")
+    return False
+
+# 전송할 뷰를 그룹별로 재정의
+VIEWS_GROUP_1 = [
+    {'luid': 'a3948637-c923-4b4b-b0ee-d7337903f123', 'filename': 'daily_dashboard_1_call.png', 'prefix_emoji': '☎️', 'title_core': '고객센터 전일 지표', 'postfix_emoji': '☎️', 'link_url': 'https://tableau.kakaocorp.com/#/site/Kakao_Mobility/views/ResponseRDashboard_ver3/_?:iid=1'},
+    {'luid': '7534cf1f-92b9-4f72-9bef-fd75920178bf', 'filename': 'daily_dashboard_2_chat.png'},
+    {'luid': '59a9309e-7394-4b94-b686-303f220053e2', 'filename': 'daily_dashboard_3_service.png'},
+]
+
+VIEWS_GROUP_2 = [
+    {'luid': '07cfa68c-6a7c-452e-bea0-975710e79e5c', 'filename': 'daily_dashboard_4_taxi.png', 'prefix_emoji': '🆃', 'title_core': '고객센터 전일 지표_서비스별', 'postfix_emoji': '🆃', 'link_url': 'https://tableau.kakaocorp.com/#/site/Kakao_Mobility/views/ResponseRDashboard_ver3/__3?:iid=1'},
+    {'luid': '818709e6-647a-4c1a-8453-a4ffce6be063', 'filename': 'daily_dashboard_5_daeri.png'},
+    {'luid': 'a01896c6-e98d-4ebc-8435-03538aab7712', 'filename': 'daily_dashboard_6_quick.png'},
+    {'luid': '7842f421-d42a-4534-ba28-cd5036c34129', 'filename': 'daily_dashboard_7_parking.png'},
+    {'luid': 'a8d73d6f-4ff0-4fc4-ba98-0300115fb5a5', 'filename': 'daily_dashboard_8_bike.png'},
+]
+
+# --- 그룹별 처리 함수 ---
+def process_and_send_group(slack_client, channel_id, view_group, group_name):
+    """태블로 인증, 대시보드 다운로드, 슬랙 전송까지 그룹별로 처리합니다."""
+    print(f"\n--- {group_name} 처리 시작 ---")
+    
+    # 1. 태블로 인증
+    tableau_session_token, actual_site_luid = tableau_auth(
+        TABLEAU_SERVER_URL, TABLEAU_PAT_NAME, TABLEAU_PAT_SECRET, TABLEAU_SITE_ID
+    )
+    if not (tableau_session_token and actual_site_luid):
+        print(f"'{group_name}'에 대한 태블로 인증에 실패하여 건너뜁니다.")
+        return
+
+    # 2. 대시보드 병렬 다운로드
+    print(f"--- {group_name} 다운로드 시작 ---")
+    download_task = partial(export_dashboard,
+                            server_url=TABLEAU_SERVER_URL,
+                            tableau_api_token=tableau_session_token,
+                            site_luid=actual_site_luid)
+    
+    downloaded_paths = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(view_group)) as executor:
+        results = list(executor.map(download_task, view_group))
+        downloaded_paths = [path for path in results if path]
+
+    # 3. 슬랙에 이미지 그룹 전송 및 로컬 파일 삭제
+    if downloaded_paths:
+        send_image_group_to_slack(slack_client, channel_id, downloaded_paths, view_group)
+        for path in downloaded_paths:
+            try:
+                os.remove(path)
+                print(f"'{path}' 파일 삭제 완료.")
+            except OSError as e:
+                print(f"'{path}' 파일 삭제 실패: {e}")
+    else:
+        print(f"'{group_name}'의 모든 대시보드 다운로드에 실패했습니다.")
+
+
+# --- 메인 작업 함수 ---
+def run_daily_report():
+    """데일리 리포트의 전체 워크플로우를 실행합니다."""
+    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✨ 데일리 리포트 작업을 시작합니다! ✨")
+    slack_client = WebClient(token=SLACK_BOT_TOKEN, timeout=300)
+    
+    # 헤더 메시지 전송
+    send_header_message_to_slack(slack_client, SLACK_CHANNEL, team_name=SLACK_TEAM_NAME)
+
+    # 그룹 1 처리 (인증 -> 다운로드 -> 전송)
+    process_and_send_group(slack_client, SLACK_CHANNEL, VIEWS_GROUP_1, "그룹 1 (유선/채팅/서비스)")
+    
+    # 그룹 2 처리를 위한 약간의 지연 시간 (선택 사항이지만 안정성에 도움)
+    time.sleep(5) 
+
+    # 그룹 2 처리 (인증 -> 다운로드 -> 전송)
+    process_and_send_group(slack_client, SLACK_CHANNEL, VIEWS_GROUP_2, "그룹 2 (택시/대리/퀵 등)")
+
+    print(f"\n--- 모든 작업 완료 ---")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🏁 데일리 리포트 작업을 마칩니다.\n")
+
+
+# --- 스크립트 실행 지점 ---
+if __name__ == "__main__":
+    # GitHub Actions에서 이 스크립트를 직접 실행하므로,
+    # 이전의 schedule 관련 코드는 모두 제거하고 run_daily_report()만 호출합니다.
+    run_daily_report()
