@@ -2,6 +2,9 @@
 # Python 3.11 Alpine 기반 이미지 사용 (보안성 및 경량화)
 FROM python:3.11-alpine
 
+# 빌드 인수 (캐시 무효화용)
+ARG CACHEBUST=1
+
 # 메타데이터 라벨
 LABEL maintainer="DevOps Team"
 LABEL description="Tableau Slack Daily Report Service"
@@ -28,8 +31,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# 캐시 무효화를 위한 더미 명령
+RUN echo "Cache bust: $(date)" > /tmp/cachebust
+
 # 의존성 파일 복사 및 설치
-COPY requirements.txt .
+COPY requirements.txt ./requirements.txt
 
 # pip 업그레이드 및 의존성 설치
 RUN pip install --upgrade pip && \
